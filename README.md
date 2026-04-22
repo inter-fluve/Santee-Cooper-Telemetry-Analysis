@@ -5,6 +5,8 @@ R workflow for processing acoustic telemetry detections of sturgeon and related 
 
 Data sources include Fathom detections, SCDNR tagging metadata, and lock operation logs.
 
+<img width="1499" height="835" alt="image" src="https://github.com/user-attachments/assets/a9e012cc-ded6-46ae-bf06-08cd60835ddb" />
+
 ---
 
 ## Workflow

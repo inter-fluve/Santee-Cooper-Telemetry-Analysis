@@ -1,7 +1,7 @@
-# Sturgeon Lock Use Analysis (2025–2026)
+# Sturgeon Lock Use Analysis 
 
 ## Overview
-R workflow for processing acoustic telemetry detections of sturgeon and related species to evaluate movement patterns in relation to Santee Cooper lock operations (Fall 2025–Spring 2026).
+R workflow for processing acoustic telemetry detections of sturgeon and related species to evaluate movement patterns in relation to Santee Cooper lock operations 
 
 Data sources include Fathom detections, SCDNR tagging metadata, and lock operation logs.
 
@@ -26,7 +26,7 @@ Data sources include Fathom detections, SCDNR tagging metadata, and lock operati
 - Combined detection table (`DF_join`)
 - Tag metadata table (`Tags_clean`)
 - Processed lock logs (`ll_final`)
-- Figures saved to `Figures_Working/2025 - 2026 Report/`
+- Figures saved to `Figures_Working/`
 
 ---
 

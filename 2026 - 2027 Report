@@ -1,0 +1,778 @@
+# This is the full cleaning and plotting script for the Santee Cooper 2027 report
+# These files fully encompass Fall 2026 - Spring 2027
+
+# --- GLOBAL ASSUMPTIONS ---
+# All file paths assume IFI Google Drive File Stream structure.
+# Fathom Central and Fathom Live exports use different column names.
+# SCDNR metadata is incomplete; some fish exist only in Fathom.
+# Receiver serial → location mapping is based on 2026–2027 deployments.
+# Season logic is custom for this report cycle.
+
+
+# --- MAINTENANCE NOTES ---
+# Update tag metadata twice per year when SCDNR sends new lists.
+# Fathom exports change format occasionally; check column names.
+# Receiver serial → location mapping must be updated if deployments change.
+# Lock logs often contain Excel errors (#VALUE!); keep na_if() in place.
+# Abacus plots generate hundreds of files - keep ggsave commented unless needed.
+
+
+
+############   Load  Libraries  ################################################
+
+# --- Assumptions & Notes ---
+# This script uses tidyverse + lubridate + glatos + fuzzyjoin for cleaning and temporal matching.
+# glatos is commented out, but potentially used, because Fathom exports follow OTN/ACT/FACT naming conventions.
+# fuzzyjoin is required for lock‑operation overlap detection (temporal interval matching).
+# All libraries are assumed installed on IFI machines; glatos may require manual install from OTN r‑universe.
+
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(readr)
+library(ggplot2)
+library(glatos)
+library(tidyr)
+library(officer)
+library(janitor)
+library(ggh4x)
+library(fuzzyjoin)
+
+#install.packages('glatos', repos = c('https://ocean-tracking-network.r-universe.dev', 'https://cloud.r-project.org'))
+
+setwd("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data")             # This working directory should be universal, as long as your desktop is signed into the IF Google Drive
+
+colpal <- c("#6a8c88", "#bc5127", "#cdab40", "#656e44", "#6c545e", "#376863",
+            "#9cac49", "#60544f", "#ba8056", "#5e7fb6", "#a84e63", "#a8a9ac", "#333333", "#014357")
+
+
+############   Load  Data  #####################################################
+
+# --- Assumptions & Notes ---
+# Lock logs are manually digitized by IFI; formatting inconsistencies (e.g., #VALUE!) are common.
+# Tagged sturgeon metadata from SCDNR is known to be incomplete; some fish may exist in Fathom but not in the CSV.
+# Fathom Central and Fathom Live exports have different column naming conventions and must be cleaned separately.
+# Live detections are appended manually because Fathom Live does not export in the same batch format.
+
+
+## LOCK LOGS
+ll <- read.csv("LockOperatorLogs/2026 - 2027 Report/LockLogs2026-2027.csv")                     # These Lock logs are digitized manually from the operator logs sent by Chad, usually monthly 
+
+
+# Tagged Sturgeon
+Tags <- read_csv("SCDNR_tagged_sturgeon_lists_and_metadata/XXXXXXXXXXXXXXXX")     # Tag metadata should be updated biannual when SCDNR tags new Sturgeon. The metadata are also uplaoded into Fathom. But this is a bit of a messy set up and I'm not sure if there are any fish missing from the Fathom animal DB
+# Lily at SCDNR let me know that more accuarate tag data lives in the following folder, however I ran out of time to merge this to our spreadsheet
+# https://drive.google.com/drive/folders/1mIchoNHvMe4WSCtSKWK_CuFUsW-qcW5D?usp=drive_link
+
+
+# Shared Fathom workspace with Santee Cooper - detections
+Dets_2026 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/DNRReceiverData/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+Dets_2027 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Fathom_Downloads/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+
+Dets <- bind_rows(Dets_2026, Dets_2027)
+
+
+#Fathom live detections
+live_dets1 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Fathom_Downloads/XXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+live_dets2 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Fathom_Downloads/XXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+
+Dets2 <- bind_rows(live_dets1, live_dets2)
+
+
+############   Tidy Detections Data  ###########################################
+
+# --- Assumptions & Notes ---
+# Renaming columns to OTN/ACT/FACT standards is required for downstream compatibility with glatos.
+# A69‑ prefix is removed because SCDNR metadata does not include it; this normalization is essential for joins.
+# receiver_sn is coerced to character because Fathom sometimes exports numeric serials.
+# drop_animal_cols removes metadata columns that appear in some Fathom Live exports but not others.
+# DF_join removes exact duplicate detections across Central + Live feeds.
+
+
+Dets_clean <- Dets %>% 
+  rename(detection_timestamp_utc = Time..UTC., # These are named this way to align with OTN/ACT/FACT Network Data Standards (and the GLATOS package)
+         receiver_sn = Receiver.Serial,
+         transmitter_id = Full.ID,
+         sensor_type = Sensor,
+         sensor_value  = Sensor.Value) %>% 
+  mutate(transmitter_id = str_remove(transmitter_id, "^A69-"),
+         source = "fathom_central",
+         detection_timestamp_utc = as.POSIXct(detection_timestamp_utc, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+         receiver_sn = as.character(receiver_sn)) %>% 
+  select(where(~ !all(is.na(.)))) 
+
+drop_animal_cols <- c("Animal.Weight..kg.","Animal.Length..m.","Length.Type","Animal.Length2..m.","Length2.Type", "Animal.Sex",
+                      "Tagger", "Release.Location", "Release.Latitude..deg.", "Release.Longitude..deg.","Release.Date.and.Time..UTC.")
+
+
+Dets2_clean <- Dets2 %>% 
+  rename(detection_timestamp_utc = Date.and.Time..UTC.,
+    receiver_sn = Receiver,
+    transmitter_id = ID,
+    sensor_type  = Sensor,
+    sensor_value = Sensor.Value..ADC.) %>% 
+  mutate(source = "fathom_live",
+         detection_timestamp_utc = as.POSIXct(detection_timestamp_utc, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+         receiver_sn = str_remove(receiver_sn, "^VRXM-")) %>% 
+  dplyr::select(where(~ !all(is.na(.)))) %>% 
+  dplyr::select(-any_of(drop_animal_cols))
+
+
+# join Cantral and Live Detections together once cleaned
+DF_join <- bind_rows(Dets_clean, Dets2_clean) %>% 
+  distinct(detection_timestamp_utc, receiver_sn, transmitter_id, .keep_all = TRUE)
+
+
+# --- Assumptions & Notes ---
+# Tags_clean only keeps fields relevant for species ID and basic metadata.
+# Tagging metadata is inconsistent across years; capture_time is used as tag_date for sturgeon.
+# A69‑ prefix removed again for consistency with detection data.
+
+Tags_clean <- Tags %>% 
+  clean_names() %>% 
+  dplyr::select(c("species_common_name", "tag_id", "tagging_time", "sex", 
+                  "capture_time", "release_time", "tagging_notes")) %>% 
+  rename(transmitter_id = tag_id) %>% 
+  mutate(transmitter_id = str_remove(transmitter_id, "^A69-"))
+
+
+# --- Assumptions & Notes ---
+# Receiver serial numbers are manually mapped to receiver locations; this mapping is based on 2026–2027 deployments.
+# receiver_location2 collapses Lock Receivers + Lock Receiver West into one category for reporting consistency.
+# AFS field standardizes species names because SCDNR metadata uses inconsistent capitalization.
+# transmitter field adds SS‑ or AS‑ prefixes for readability in figures.
+# Season logic is custom: December 2026 is treated as Spring because fish behavior matches Spring patterns.
+
+# Master Dataframe "DF"
+DF <- left_join(DF_join, Tags_clean) %>% 
+  filter(!is.na(species_common_name)) %>% 
+  distinct(detection_timestamp_utc, transmitter_id, .keep_all = T) %>% # get rid of Dupes
+  mutate(receiver_location = case_when(
+    str_detect(receiver_sn, "111745") ~ "RKM 76",
+    str_detect(receiver_sn, "138299") ~ "RKM 73",
+    str_detect(receiver_sn, "489380") ~ "RKM 77",
+    str_detect(receiver_sn, "489374") ~ "Lock Entrance Channel",
+    str_detect(receiver_sn, "457073") ~ "Lock Receivers",
+    str_detect(receiver_sn, "457074") ~ "Lock Receiver West",
+    TRUE ~ receiver_sn ))  %>% 
+  mutate(receiver_location2 = case_when(
+    receiver_location %in% c("Lock Receivers", "Lock Receiver West") ~ "Lock Receivers",
+    TRUE ~ receiver_location)) %>% 
+  mutate(AFS = case_when(
+    species_common_name == "Shortnose sturgeon" ~ "Shortnose Sturgeon",
+    species_common_name %in% c("Atlantic sturgeon", "Atlantic Sturgeon") ~ "Atlantic Sturgeon",
+    TRUE ~ species_common_name)) %>% 
+  mutate(transmitter = case_when(
+    AFS == "Shortnose Sturgeon" ~ paste0("SS-", transmitter_id),
+    AFS == "Atlantic Sturgeon" ~ paste0("AS-", transmitter_id),
+    TRUE ~ transmitter_id )) %>% 
+  mutate(Year = year(detection_timestamp_utc),
+         Month = month(detection_timestamp_utc),
+         Season = case_when(
+           Year == 2026 & Month == 12 ~ "Spring",            # December 2026 -> Spring
+           Year == 2026 ~ "Fall",                            # All other 2026-> Fall
+           Year == 2027 ~ "Spring",                          # All 2027 -> Spring
+           TRUE ~ NA_character_)) %>% 
+  mutate(detection_timestamp_est = with_tz(detection_timestamp_utc, tzone = "America/New_York")) %>% 
+  remove_empty(c("rows", "cols")) %>% 
+  mutate(date = as.Date(detection_timestamp_est)) %>% 
+  filter(detection_timestamp_utc > "2026-07-01") %>% 
+
+  mutate(transmitter_label = str_remove(transmitter_id, "^9001-"))
+
+# Check if there are exact time duplicates on both of the Fathom Live receivers  
+DF %>%  filter(receiver_location2 == "Lock Receivers") %>%  group_by(detection_timestamp_utc) %>%  summarise(count = n()) %>% filter(count > 1)
+
+
+# Test Tags: Test Tags: 9001-65003/ 9001-59293/ 1602-1234/ 1602-2468
+
+
+############   Internal diagnostics    ####################################### 
+## You can kinda ignore this section
+
+# --- Assumptions & Notes ---
+# This section identifies tag IDs present in detections but missing from metadata.
+# Missing tags often correspond to shad or test tags; this is expected.
+# known_tags merges shad + sturgeon metadata for species‑level frequency plots.
+
+
+# Create a clean list of unique tag IDs from detections
+detection_tags <- DF_join %>%
+  filter(detection_timestamp_utc > "2026-07-01 19:53:01") %>% 
+  distinct(transmitter_id) %>%
+  pull(transmitter_id)
+
+# Create a clean list of unique tag IDs from metadata
+animal_tags <- Tags_clean %>%
+  distinct(transmitter_id) %>%
+  pull(transmitter_id)
+
+# Find the tags in the detections that are NOT in the animal metadata
+missing_tags <- setdiff(detection_tags, animal_tags)
+
+# Print a clear message to the console
+if (length(missing_tags) > 0) {
+  cat( "Number of missing tag IDs:", length(missing_tags), "\n",
+       "The following tag IDs were detected but are not in the animal metadata:\n")
+ # cat(missing_tags, sep = "\n")
+} else {
+  cat("All detected tag IDs are present in the animal metadata.\n")
+}
+
+shad_tags <- read.csv("SCDNR_tagged_sturgeon_lists_and_metadata/shad_tags.csv") %>% clean_names() %>% 
+  mutate(transmitter_id = str_remove(transmitter_id, "^A69-"),
+         species_common_name = "Shad",
+         tag_date = ymd_hm(tag_date),
+         tag_date = replace_na(tag_date, ymd_hm("2026-01-31 12:00"))) 
+
+sturgeon_tags <- Tags %>% clean_names() %>%  
+  mutate(transmitter_id = tag_id, tag_date = capture_time) %>% 
+  dplyr::select(c(tag_date, transmitter_id, species_common_name)) %>% 
+  mutate(transmitter_id = str_remove(transmitter_id, "^A69-"))
+
+known_tags <- full_join(shad_tags, sturgeon_tags)
+
+FULL_DF <- left_join(DF_join, known_tags)
+
+FULL_DF %>%
+  mutate(date = as.Date(detection_timestamp_utc)) %>%
+  group_by(date, species_common_name) %>%
+  summarise(frq = n_distinct(transmitter_id), .groups = "drop") %>%
+  ggplot(aes( x = date,  y = frq, fill = species_common_name, color = species_common_name )) +
+  geom_col() +
+  theme_bw() +
+  labs(x = "Date",  y = "Number of Distinct Transmitter IDs" )
+
+############   Lock Logs  ######################################################
+
+# --- Assumptions & Notes ---
+# Lock operator logs contain Excel errors (#VALUE!) and inconsistent time formatting.
+# Times are combined with the Date column using ymd_hm; assumes logs are always in EST.
+# lock_closed_start_time and lock_closed_end_time represent assumed nightly closure windows. This is not used in formal analysis
+
+
+time_cols <- c(
+  "Exact.Time.Lower.Miter.Gates.Closed",
+  "Exact.Time.Upper.Miter.Gates.Opened",
+  "Exact.Time.Upper.Miter.Gates.Closed",
+  "Exact.Time.Lower.Tainter.Gates.Opened",
+  "Exact.Time.Lower.Tainter.Gates.Closed",
+  "Exact.Time.Lower.Miter.Gates.Opened"
+)
+
+ll_final <- ll %>%
+  mutate(Date = mdy(Date)) %>%                  
+  mutate(across(all_of(time_cols), ~ na_if(., "#VALUE!"))) %>%  
+  mutate(
+    LowerMiter.Opened   = ymd_hm(paste(Date, `Exact.Time.Lower.Miter.Gates.Opened`), tz = "America/New_York"),
+    LowerMiter.Closed   = ymd_hm(paste(Date, `Exact.Time.Lower.Miter.Gates.Closed`), tz = "America/New_York"),
+    UpperMiter.Opened   = ymd_hm(paste(Date, `Exact.Time.Upper.Miter.Gates.Opened`), tz = "America/New_York"),
+    UpperMiter.Closed   = ymd_hm(paste(Date, `Exact.Time.Upper.Miter.Gates.Closed`), tz = "America/New_York"),
+    LowerTainter.Opened = ymd_hm(paste(Date, `Exact.Time.Lower.Tainter.Gates.Opened`), tz = "America/New_York"),
+    LowerTainter.Closed = ymd_hm(paste(Date, `Exact.Time.Lower.Tainter.Gates.Closed`), tz = "America/New_York")
+  ) %>%
+  select(
+    Date, Operators.Initials,
+    LowerMiter.Opened, LowerMiter.Closed,
+    UpperMiter.Opened, UpperMiter.Closed,
+    LowerTainter.Opened, LowerTainter.Closed
+  )
+
+
+
+# The hardcoded time intervals for gate status
+# This is a key assumption from the original code
+lock_closed_start_time <- hms::parse_hms("20:00:00")
+lock_closed_end_time <- hms::parse_hms("06:30:00")
+
+
+############   Summary Statistics   ############################################
+
+# --- Assumptions & Notes ---
+# Duration calculations assume continuous presence between first and last detection.
+
+DF %>%
+  group_by(AFS, transmitter_id, Season) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(AFS, transmitter_id) %>%
+  summarise(n_seasons = n_distinct(Season), .groups = "drop")  %>% 
+  filter(n_seasons > 1 & AFS != NA) %>%
+  pull(transmitter_id) %>%
+  unique()
+
+# Number of seasons each fish was present
+DF %>%  group_by(transmitter_id, Season, AFS) %>% 
+  distinct(transmitter_id, Season, AFS) %>% 
+  summarise(count = n()) %>% 
+  group_by(transmitter_id, AFS) %>% 
+  summarise(n_seasons = n()) %>% print(n = 40)
+
+
+#Number of days that a sturgeon is in the system 
+DF %>% 
+  filter(str_detect(AFS, regex("sturgeon", ignore_case = TRUE))) %>% 
+  group_by(transmitter_id) %>% 
+  reframe(AFS = first(AFS),
+          Season = first(Season),
+          Year = first(Year),
+          First.Entry = as.Date(min(detection_timestamp_est)),
+          Last.Entry  = as.Date(max(detection_timestamp_est)),
+          Duration = as.numeric(Last.Entry - First.Entry),
+          tagging_time = as.Date(release_time)) %>% 
+  distinct(transmitter_id, .keep_all = TRUE) %>% 
+  arrange(First.Entry) %>% 
+  print(n = 40)
+
+# write.csv(observed.sturgeon,"I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Figures_Working/2026 - 2027 Report/observed_sturgeon_2026_2027.csv",row.names = FALSE)
+
+
+############   Figures         #################################################
+
+# --- Assumptions & Notes ---
+# All figures save to a hard‑coded path tied to the 2026–2027 report.
+# Histograms use daily binwidth (24 hours) to match reporting requirements.
+# receiver_location2 is used instead of receiver_location for consistency.
+
+
+# This is the save path - change depending on what report you're working on 
+path = "I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Figures_Working/2026 - 2027 Report/"
+
+DF %>% 
+ # filter(transmitter_id == "9001-65003" & receiver_location == "Lock Receivers" & Season == "Fall") %>% 
+  filter(transmitter_id == "9001-65003" & receiver_location2 %in% c("Lock Receivers") & Season == "Fall") %>% 
+  # filter(transmitter_id == "9001-65003" & receiver_location == "Lock Receiver West" & Season == "Fall") %>% 
+    ggplot(aes(x = detection_timestamp_est, fill = receiver_location2 )) +
+  geom_histogram(binwidth = 3600*24, position = "identity") +  
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time", y = "Frequency of detections per day", 
+       title = "Fall 2026: Internal Test Tag Detections",
+       fill = "Receiver Location") +
+  scale_fill_manual(values=c( "#030303","#00dd00", "#00aaff","#9d4eec", "orange", "red"),
+                    breaks=c('Lock Receivers', 'RKM 77', 'RKM 76', 'RKM 73', 'Lock Entrance Channel', 'Lock Receiver West'))
+
+ggsave(path = path, filename = "Figure4.1.Internal_Test_tag_Fall.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+# checking time of detection dip
+DF %>%
+  filter(transmitter_id == "9001-65003",
+       receiver_location2 == "Lock Receivers",
+       Season == "Fall") %>%
+  mutate(day = as.Date(detection_timestamp_est)) %>%
+  group_by(day) %>%
+  summarise(detections = n()) %>% 
+  filter(detections < quantile(detections, 0.1))
+
+
+DF %>% 
+  # filter(transmitter_id == "9001-65003" & receiver_location == "Lock Receivers" & Season == "Fall") %>% 
+  filter(transmitter_id == "9001-65003" & receiver_location2 %in% c("Lock Receivers") & Season == "Spring") %>% 
+  # filter(transmitter_id == "9001-65003" & receiver_location == "Lock Receiver West" & Season == "Fall") %>% 
+  ggplot(aes(x = detection_timestamp_est, fill = receiver_location2 )) +
+  geom_histogram(binwidth = 3600*24, position = "identity") +  
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time", y = "Frequency of detections per day", 
+       title = "Spring 2027: Internal Test Tag Detections",
+       fill = "Receiver Location") +
+  scale_fill_manual(values=c( "#030303","#00dd00", "#00aaff","#9d4eec", "orange", "red"),
+                    breaks=c('Lock Receivers', 'RKM 77', 'RKM 76', 'RKM 73', 'Lock Entrance Channel', 'Lock Receiver West'))
+
+ggsave(path = path, filename = "Figure4.4.Internal_Test_tag_Spring.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+
+DF %>% 
+  filter(transmitter_id %in% c("9001-65003", "9001-59293"),
+         #receiver_location %in% c("Lock Receivers", "RKM 76", "RKM 77", 
+          #                        "Lock Entrance Channel", "RKM 73"),
+         Season == "Fall") %>% 
+  ggplot(aes(x = detection_timestamp_est, group = receiver_location2, fill = receiver_location2)) + 
+  geom_histogram(binwidth = 3600*24, position = "stack") +
+  facet_wrap(~ transmitter_id + receiver_location2, ncol = 4,
+             labeller = labeller(transmitter_id = c("9001-59293" = "External Tag","9001-65003" = "Internal Tag"  )) ) +
+  scale_fill_manual(values = c("#030303", "#00dd00", "#00aaff", "#9d4eec", "orange"),
+                    breaks = c("Lock Receivers", "RKM 77", "RKM 76", "RKM 73", "Lock Entrance Channel") ) +
+  xlab("Date") +
+  ylab("Frequency of detections per day") +
+  ggtitle("Test Tag Overview Fall 2026") +
+  labs(fill = "Receiver Location") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 10)) +
+  theme_bw()+
+  theme(panel.grid = element_blank())
+ggsave(path = path, filename = "Figure4.2.Test_tag_overview_Fall_FINAL.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+
+
+DF %>% 
+  filter(transmitter_id %in% c("9001-65003", "9001-59293"),
+         receiver_location %in% c("Lock Receivers", "RKM 76", "RKM 77", 
+                             "Lock Entrance Channel", "RKM 73"),
+         Season == "Spring") %>% 
+  ggplot(aes(x = detection_timestamp_est, group = receiver_location, fill = receiver_location)) + 
+  geom_histogram(binwidth = 3600*24, position = "stack") +
+  facet_wrap(~ transmitter_id + receiver_location, ncol = 4,
+             labeller = labeller(transmitter_id = c("9001-59293" = "External Tag","9001-65003" = "Internal Tag"  )) ) +
+  scale_fill_manual(values = c("#030303", "#00dd00", "#00aaff", "#9d4eec", "orange"),
+                    breaks = c("Lock Receivers", "RKM 77", "RKM 76", "RKM 73", "Lock Entrance Channel") ) +
+  xlab("Date") +
+  ylab("Frequency of detections per day") +
+  ggtitle("Test Tag Overview Spring 2027") +
+  labs(fill = "Receiver Location") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 10)) +
+  theme_bw()+
+  theme(panel.grid = element_blank())
+ggsave(path = path, filename = "Figure4.5.Test_tag_overview_Spring_FINAL.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+
+
+
+DF %>% 
+  filter(AFS %in% c("Shortnose Sturgeon", "Atlantic Sturgeon")) %>% 
+  filter(Season == "Fall") %>% 
+  ggplot(aes(x = detection_timestamp_est, group=receiver_location2,fill=receiver_location2)) + 
+  geom_histogram(binwidth = 3600*24, position = "stack") +
+  #geom_text(size = 5, position = position_stack(vjust = 0.5)) +
+  xlab("Date") +
+  ylab("Frequency of detections per day") +
+  labs(fill = "Receiver")+
+  guides(fill=guide_legend(reverse = TRUE))+ 
+  ggtitle("Fall 2026 Sturgeon Detections By Receiver")+
+  theme(plot.title = element_text(size = 10))+
+  scale_fill_manual(values = c( "#030303","#00dd00", "#00aaff","#9d4eec", "orange", "red"),
+                    breaks=c('Lock Receivers', 'RKM 77', 'RKM 76', 'RKM 73', 'Lock Entrance Channel')) +
+  theme_bw()+
+  theme(panel.grid = element_blank()) 
+ggsave(path = path, filename = "Figure4.3.Fall_Detections_by_receiver_non_facet.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+
+
+
+DF %>% 
+  filter(AFS %in% c("Shortnose Sturgeon", "Atlantic Sturgeon")) %>% 
+  filter(Season == "Spring") %>% 
+  filter(date <= as.Date("2026-06-01")) %>% 
+  ggplot(aes(x = detection_timestamp_est, group=receiver_location2,fill=receiver_location2)) + 
+  geom_histogram(binwidth = 3600*24, position = "stack") +
+  #geom_text(size = 5, position = position_stack(vjust = 0.5)) +
+  xlab("Date") +
+  ylab("Frequency of detections per day") +
+  labs(fill = "Receiver")+
+  guides(fill=guide_legend(reverse = TRUE))+ 
+  ggtitle("Spring 2027 Sturgeon Detections By Receiver")+
+  theme(plot.title = element_text(size = 10))+
+  scale_fill_manual(values = c( "#030303","#00dd00", "#00aaff","#9d4eec", "orange", "red"),
+                    breaks=c('Lock Receivers', 'RKM 77', 'RKM 76', 'RKM 73', 'Lock Entrance Channel')) +
+  theme_bw()+
+  theme(panel.grid = element_blank()) 
+ggsave(path = path, filename = "Figure4.6.Spring_Detections_by_receiver_non_facet.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+DF %>% 
+  filter(AFS %in% c("Shortnose Sturgeon", "Atlantic Sturgeon")) %>% 
+  filter(Season == "Fall") %>% 
+  filter(!is.na(receiver_location2)) %>% 
+  group_by(date,receiver_location2, transmitter_label) %>%
+  summarize(freq=n()) %>%
+  mutate(receiver_location2 = factor(receiver_location2,
+                                     levels = c("Lock Receivers",
+                                                "Lock Entrance Channel",
+                                                "RKM 77",
+                                                "RKM 76",
+                                                "RKM 73"))) %>% 
+  ggplot(aes(x = date, y = freq, group=receiver_location2,fill=transmitter_label, label=freq)) + 
+  geom_col() +
+  #geom_text(size = 5, position = position_stack(vjust = 0.5)) +
+  xlab("Date") +
+  ylab("Frequency of detections per day") +
+  labs(fill = "Sturgeon")+
+  guides(fill=guide_legend(reverse = TRUE))+ 
+  ggtitle("Fall 2026 Sturgeon Detections By Receiver")+
+  theme(plot.title = element_text(size = 10))+
+  theme_bw() +
+  facet_wrap(~receiver_location2)+
+  theme(panel.grid = element_blank())
+ggsave(path = path, filename = "Figure4.7.Fall_Detections_by_receiver.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+
+DF %>%  filter(Season == "Fall") %>% 
+  distinct(transmitter_id, capture_time, species_common_name) 
+
+
+
+
+DF %>% 
+  filter(AFS %in% c("Shortnose Sturgeon", "Atlantic Sturgeon")) %>% 
+  filter(Season == "Spring") %>% 
+  filter(date <= as.Date("2027-06-01")) %>% 
+  filter(!is.na(receiver_location2)) %>% 
+  group_by(date,receiver_location2, transmitter_label) %>%
+  summarize(freq=n()) %>%
+  mutate(receiver_location2 = factor(receiver_location2,
+                               levels = c("Lock Receivers",
+                                          "Lock Entrance Channel",
+                                          "RKM 77",
+                                          "RKM 76",
+                                          "RKM 73"))) %>% 
+  ggplot(aes(x = date, y = freq, group=receiver_location2,fill=transmitter_label, label=freq)) + 
+  geom_col() +
+  #geom_text(size = 5, position = position_stack(vjust = 0.5)) +
+  xlab("Date") +
+  ylab("Frequency of detections per day") +
+  labs(fill = "Sturgeon")+
+  guides(fill=guide_legend(reverse = TRUE))+ 
+  ggtitle("Spring 2027 Sturgeon Detections By Receiver")+
+  theme(plot.title = element_text(size = 10))+
+  theme_bw() +
+  facet_wrap(~receiver_location2)+
+  theme(panel.grid = element_blank())
+ggsave(path = path, filename = "a12_Spring_Detections_by_receiver.jpeg", plot = last_plot(), width = 8, height = 7, units = "in", dpi = 300)
+
+
+
+
+
+############   Lock Receivers Timing with Individual Sturgeon History ###########
+
+# --- Assumptions & Notes ---
+# "Abacus" plots show detections by hour of day, faceted by date.
+# Lock rectangles (ll_rect) show tainter gate open intervals.
+# panel_df shading shows lock broken vs operational; remove for future years.
+# Font scaling is dynamic to handle fish with many detection days.
+# This loop produces many plots; ggsave is commented out to avoid accidental mass export.
+
+# ---- helper to chunk facets ----
+chunk_vec <- function(x, n) {
+  split(x, ceiling(seq_along(x) / n))
+}
+  
+ids <- unique(DF$transmitter_label)
+seasons <- unique(DF$Season)
+save_folder <- "I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Figures_Working/2026 - 2027 Report/"
+counter <- 1
+
+ll_rect <- ll_final %>%  
+  mutate(date = as.Date(LowerTainter.Opened),
+         xmin = hour(LowerTainter.Opened) + minute(LowerTainter.Opened)/60,
+         xmax = hour(LowerTainter.Closed) + minute(LowerTainter.Closed)/60) %>%
+  dplyr::select(date, xmin, xmax)
+
+
+
+for (season in seasons) {
+  for (id in ids) {
+    df_pts <- DF %>%
+      filter(AFS %in% c("Shortnose Sturgeon", "Atlantic Sturgeon"),
+             transmitter_label == id,
+             Season == season) %>%
+      mutate(
+        hour_of_day = lubridate::hour(detection_timestamp_est) +
+          lubridate::minute(detection_timestamp_est)/60,
+        receiver_location2 = factor(receiver_location2,
+                                    levels = c("Lock Receivers",
+                                               "Lock Entrance Channel",
+                                               "RKM 77",
+                                               "RKM 76",
+                                               "RKM 73"))) %>% 
+      droplevels()
+    
+    if (nrow(df_pts) == 0) next
+    
+    species_name <- unique(df_pts$AFS)
+    year_val <- unique(lubridate::year(df_pts$date))
+    
+    # ---- chunk dates into groups of 25 for pagination ----
+    all_dates <- sort(unique(df_pts$date))
+    date_chunks <- chunk_vec(all_dates, 25)
+    n_pages <- length(date_chunks)
+    
+    for (page in seq_along(date_chunks)) {
+      
+      page_dates <- date_chunks[[page]]
+      
+      df_pts_page <- df_pts %>% filter(date %in% page_dates)
+      df_pts_page$date <- factor(df_pts_page$date, levels = as.character(sort(page_dates)))
+    
+      
+      # filter lock rectangles to dates for this fish/page
+      ll_rect_sub <- ll_rect %>% filter(date %in% page_dates)
+      
+      p <- ggplot(df_pts_page, aes(x = hour_of_day, y = forcats::fct_rev(receiver_location2), color = receiver_location2)) +
+        geom_point(alpha = 0.5, size = 2, position = position_jitter(height = 0.15)) +
+        geom_rect(data = ll_rect_sub,
+                  aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                  fill = "grey30", alpha = 0.12, inherit.aes = FALSE) +
+        facet_wrap(~date) +
+        labs(
+          title = paste0(season, " ", year_val, ": Detections for Transmitter ", id, " - ", species_name,
+                         if (n_pages > 1) paste0(" (page ", page, " of ", n_pages, ")") else ""),
+          x = "Hour of Day",
+          y = "Receiver Location",
+          color = "Receiver Location",
+          fill = "Lock Status"
+        ) +
+        theme_bw() +
+        theme(panel.grid = element_blank()) +
+        scale_color_manual(values = c("#030303", "#00dd00", "#00aaff", "#9d4eec", "orange"),
+                           breaks = c('Lock Receivers', 'RKM 77', 'RKM 76', 'RKM 73', 'Lock Entrance Channel'))
+      
+      n_facets <- length(page_dates)
+      plot_width  <- min(50, max(8, n_facets * 1)) 
+      plot_height <- min(50, max(6, n_facets * 0.65))  
+      
+      base_font <- 10
+      scale_factor <- (plot_width / 10)
+      font_size <- base_font * scale_factor
+      
+      p <- p +
+        theme_bw(base_size = font_size) +
+        theme(
+          panel.grid = element_blank(),
+          strip.text = element_text(size = font_size * 0.8),
+          axis.text  = element_text(size = font_size * 0.75),
+          axis.title = element_text(size = font_size * 0.8),
+          legend.text = element_text(size = font_size * 0.85),   # bumped up from 0.6
+          legend.title = element_text(size = font_size * 0.95),  # bumped up from 0.8
+          plot.title  = element_text(size = font_size)
+        )
+      
+      print(p)
+      
+      page_suffix <- if (n_pages > 1) paste0("_page", page) else ""
+      file_name <- paste0(save_folder, "Abacus", counter, "_detections_with_locks_", season, "_", year_val, "_", id, "_", gsub(" ", "_", species_name), "_Page", page_suffix, ".jpeg")
+       ggsave(filename = file_name, plot = p, width = plot_width, height = plot_height, units = "in", dpi = 300, limitsize = FALSE)
+      counter <- counter + 1 
+    }
+  }
+}
+
+
+
+############   CONCERN occurrences - Lock Receivers Timing with Individual Sturgeon History ###########
+
+# --- Assumptions & Notes ---
+# fuzzy_inner_join identifies detections occurring during lock‑open intervals.
+# Only detections at Lock Receivers are considered for concern events.
+# DF_overlap filters DF to only fish/dates where overlap occurred.
+# Plots highlight potential fish‑lock interactions for reporting.
+
+
+# Build lock operation intervals
+lock_ops <- ll_final %>%
+  dplyr::select(date = Date,
+    lock_open  = LowerTainter.Opened,
+    lock_close = LowerTainter.Closed) %>%
+  filter(!is.na(lock_open), !is.na(lock_close))
+
+
+# Filter detections INSIDE the lock (Lock Receivers only)
+lock_dets <- DF %>%
+  filter(receiver_location == "Lock Receivers",
+         AFS %in% c("Atlantic Sturgeon", "Shortnose Sturgeon")) %>%
+  dplyr::select(transmitter_label,  AFS,  detection_timestamp_est,  date, receiver_location)
+
+
+# Temporal join: find detections that occurred during lock-open intervals
+events <- fuzzy_inner_join(lock_dets, lock_ops, 
+                           by = c( "detection_timestamp_est" = "lock_open","detection_timestamp_est" = "lock_close"),  
+                           match_fun = list(`>=`, `<=`))
+
+
+
+# Clean event table (optional but tidy)
+events_clean <- events %>%
+  mutate(event_id = paste(date.x, transmitter_label, sep = "_")) %>%
+  dplyr::select(event_id,  transmitter_label,  AFS,  detection_timestamp_est,  lock_open,  lock_close,  date = date.x)
+
+
+
+# Extract fish + date combinations where overlap occurred
+overlap_keys <- events_clean %>%
+  distinct(transmitter_label, date)
+
+# Filter DF to only those fish + dates
+DF_overlap <- DF %>%
+  inner_join(overlap_keys, by = c("transmitter_label", "date"))
+
+
+# PLOT
+
+ids <- unique(DF_overlap$transmitter_label)
+seasons <- unique(DF_overlap$Season)
+save_folder <- "I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Figures_Working/2026 - 2027 Report/"
+counter <- 1
+
+# Lock rectangles for plotting
+ll_rect <- ll_final %>%  
+  mutate(date = as.Date(LowerTainter.Opened),
+         xmin = hour(LowerTainter.Opened) + minute(LowerTainter.Opened)/60,
+         xmax = hour(LowerTainter.Closed) + minute(LowerTainter.Closed)/60) %>%
+  dplyr::select(date, xmin, xmax)
+
+for (season in seasons) {
+  for (id in ids) {
+    
+    df_pts <- DF_overlap %>%
+      filter(
+        AFS %in% c("Shortnose Sturgeon", "Atlantic Sturgeon"),
+        transmitter_label == id,
+        Season == season) %>%
+      mutate(hour_of_day = lubridate::hour(detection_timestamp_est) +
+               lubridate::minute(detection_timestamp_est)/60, receiver_location2 = factor(receiver_location2,
+          levels = c("Lock Receivers", "Lock Entrance Channel",  "RKM 77", "RKM 76", "RKM 73")))
+    
+    if (nrow(df_pts) == 0) next
+    
+    species_name <- unique(df_pts$AFS)
+    year_val <- unique(lubridate::year(df_pts$date))
+    
+    # Lock rectangles only for the dates in THIS df
+    ll_rect_sub <- ll_rect %>%  filter(date %in% unique(df_pts$date))
+    
+    # Plot
+    p <- ggplot(df_pts, aes(x = hour_of_day,
+                            y = forcats::fct_rev(receiver_location2),
+                            color = receiver_location2)) +
+      geom_point(alpha = 0.5, size = 2, position = position_jitter(height = 0.15)) +
+      geom_rect(data = ll_rect_sub, aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                fill = "grey30", alpha = 0.12,inherit.aes = FALSE) +
+      facet_wrap(~date) +
+      labs(title = paste(season, year_val,": Detections for Transmitter", id, "-", species_name),
+        x = "Hour of Day",
+        y = "Receiver Location",
+        color = "Receiver Location") +
+      theme_bw() +
+      theme(panel.grid = element_blank()) +
+      scale_color_manual(
+        values = c("#030303","#00dd00","#00aaff","#9d4eec","orange"),
+        breaks = c("Lock Receivers","RKM 77","RKM 76","RKM 73","Lock Entrance Channel"))
+    
+    # dynamic sizing
+    n_facets <- length(unique(df_pts$date))
+    plot_width  <- min(50, max(8, n_facets * 1))
+    plot_height <- min(50, max(6, n_facets * 0.65))
+    
+    base_font <- 10
+    scale_factor <- (plot_width / 10)
+    font_size <- base_font * scale_factor
+    
+    p <- p +
+      theme_bw(base_size = font_size) +
+      theme(panel.grid = element_blank(),
+        strip.text = element_text(size = font_size * 0.8),
+        axis.text  = element_text(size = font_size * 0.6),
+        axis.title = element_text(size = font_size * 0.8),
+        legend.text = element_text(size = font_size * 0.6),
+        legend.title = element_text(size = font_size * 0.8),
+        plot.title  = element_text(size = font_size))
+    
+    print(p)
+    
+    file_name <- paste0(save_folder,  "CONCERN_PLOT", counter, "_detections_with_locks_",  season, "_", year_val, "_", id, "_",  gsub(" ", "_", species_name), ".jpeg")
+    ggsave(filename = file_name, plot = p, width = plot_width, height = plot_height, units = "in", dpi = 300, limitsize = FALSE)
+    counter <- counter + 1
+  }
+}
+
+         
+

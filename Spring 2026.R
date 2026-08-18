@@ -2,19 +2,18 @@
 # These files fully encompass Fall 2025 - Spring 2026
 
 # --- GLOBAL ASSUMPTIONS ---
-# All file paths assume IFI Google Drive File Stream structure.
+# All file paths assume IFI Google Drive File  structure.
 # Fathom Central and Fathom Live exports use different column names.
-# SCDNR metadata is incomplete; some fish exist only in Fathom.
+# SCDNR metadata is incomplete; some fish exist only in Fathom. 
 # Receiver serial → location mapping is based on 2025–2026 deployments.
 # Season logic is custom for this report cycle.
-# Lock outage dates (Feb 10–Apr 10, 2026) are hard‑coded.
+# Lock outage dates (Feb 10–Apr 10 ish, 2026) are hard‑coded.
 
 
 # --- MAINTENANCE NOTES ---
-# Update tag metadata twice per year when SCDNR sends new lists.
+# Update tag metadata twice per year when SCDNR sends new lists. Lily and Ellen will send Metadata
 # Fathom exports change format occasionally; check column names.
 # Receiver serial / location mapping must be updated if deployments change.
-# Lock logs often contain Excel errors (#VALUE!); keep na_if() in place.
 # Abacus plots generate many files - keep ggsave commented unless needed.
 
 
@@ -25,7 +24,7 @@
 # This script uses tidyverse + lubridate + glatos + fuzzyjoin for cleaning and temporal matching.
 # glatos is commented out, but potentially used, because Fathom exports follow OTN/ACT/FACT naming conventions.
 # fuzzyjoin is required for lock‑operation overlap detection (temporal interval matching).
-# All libraries are assumed installed on IFI machines; glatos may require manual install from OTN r‑universe.
+# If ever using glatos, it  may require manual install from OTN directly 
 
 library(dplyr)
 library(tidyverse)
@@ -43,6 +42,7 @@ library(fuzzyjoin)
 
 setwd("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data")             # This working directory should be universal, as long as your desktop is signed into the IF Google Drive
 
+# This is the interfluve color palette, not the strugeon report one
 colpal <- c("#6a8c88", "#bc5127", "#cdab40", "#656e44", "#6c545e", "#376863",
             "#9cac49", "#60544f", "#ba8056", "#5e7fb6", "#a84e63", "#a8a9ac", "#333333", "#014357")
 
@@ -50,7 +50,7 @@ colpal <- c("#6a8c88", "#bc5127", "#cdab40", "#656e44", "#6c545e", "#376863",
 ############   Load  Data  #####################################################
 
 # --- Assumptions & Notes ---
-# Lock logs are manually digitized by IFI; formatting inconsistencies (e.g., #VALUE!) are common.
+# Lock logs are manually digitized by IFI; formatting inconsistencies (e.g., #VALUE!) can occur
 # Tagged sturgeon metadata from SCDNR is known to be incomplete; some fish may exist in Fathom but not in the CSV.
 # Fathom Central and Fathom Live exports have different column naming conventions and must be cleaned separately.
 # Detections_2025 includes late‑2025 data; Detections_2026 and 2026_2 are separate Fathom pulls.
@@ -72,8 +72,10 @@ Tags <- read_csv("SCDNR_tagged_sturgeon_lists_and_metadata/allanimals_Jan2026.cs
 Dets_2025 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/DNRReceiverData/detections_2026-01-21_21-23-45.csv")
 Dets_2026 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Fathom_Downloads/detections_2026-04-14_13-33-14.csv")
 Dets_2026_2 <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/Fathom_Downloads/detections_2026-08-03_17-32-00.csv")
+VDAT <- read.csv("I:/Shared drives/IFI/Projects_Active/SanteeCooper_FERC_19-04-09/IFI_TASKS/Task_Y_SturgUseofLock/Data/DNRReceiverData/Receiver Download Jne 2026/detections_2026-08-13_16-17-01.csv")
+# Hi Matt! you can ignore the VDAT call here moving froward, but I needed to manually convert the VDAT to a CSV in fathom - things always get wonky :/
 
-Dets <- bind_rows(Dets_2025, Dets_2026, Dets_2026_2)
+Dets <- bind_rows(Dets_2025, Dets_2026, Dets_2026_2, VDAT) %>% distinct()
 
 
 #Fathom live detections
@@ -87,7 +89,7 @@ Dets2 <- bind_rows(live_dets1, live_dets2)
 ############   Tidy Detections Data  ###########################################
 
 # --- Assumptions & Notes ---
-# Renaming columns to OTN/ACT/FACT standards is required for downstream compatibility with glatos.
+# Renaming columns to OTN/ACT/FACT standards is required for downstream compatibility 
 # A69‑ prefix is removed because SCDNR metadata does not include it; this normalization is essential for joins.
 # receiver_sn is coerced to character because Fathom sometimes exports numeric serials.
 # drop_animal_cols removes metadata columns that appear in some Fathom Live exports but not others.
@@ -184,9 +186,13 @@ DF <- left_join(DF_join, Tags_clean) %>%
   mutate(date = as.Date(detection_timestamp_est)) %>% 
   filter(detection_timestamp_utc > "2025-07-01") %>% 
   mutate(lock.status = case_when(
-    date >= as.Date("2026-02-10") & date <= as.Date("2026-04-10") ~ "non operational",
+    date >= as.Date("2026-02-10") & date <= as.Date("2026-04-02") ~ "non operational",
+    date >= as.Date("2026-04-04") & date <= as.Date("2026-04-08") ~ "non operational",
+    date == as.Date("2026-04-28") ~ "non operational",
+    date == as.Date("2026-04-29") ~ "non operational",
     TRUE ~ "operational")) %>% 
-  mutate(transmitter_label = str_remove(transmitter_id, "^9001-"))
+  mutate(transmitter_label = str_remove(transmitter_id, "^9001-")) %>% 
+  filter(date <= as.Date("2026-05-01"))
 
 # Check if there are exact time duplicates on both of the Fathom Live receivers  
 DF %>%  filter(receiver_location2 == "Lock Receivers") %>%  group_by(detection_timestamp_utc) %>%  summarise(count = n()) %>% filter(count > 1)
@@ -254,7 +260,7 @@ FULL_DF %>%
 ############   Lock Logs  ######################################################
 
 # --- Assumptions & Notes ---
-# Lock operator logs contain Excel errors (#VALUE!) and inconsistent time formatting.
+# Lock operator logs sometimes contain Excel errors (#VALUE!) and inconsistent time formatting.
 # Times are combined with the Date column using ymd_hm; assumes logs are always in EST.
 # lock_closed_start_time and lock_closed_end_time represent assumed nightly closure windows. This is not used in formal analysis
 
@@ -289,7 +295,7 @@ ll_final <- ll %>%
 
 
 # The hardcoded time intervals for gate status
-# This is a key assumption from the original code
+# This is an assumption from the original code
 lock_closed_start_time <- hms::parse_hms("20:00:00")
 lock_closed_end_time <- hms::parse_hms("06:30:00")
 
@@ -297,7 +303,7 @@ lock_closed_end_time <- hms::parse_hms("06:30:00")
 ############   Summary Statistics   ############################################
 
 # --- Assumptions & Notes ---
-# No fish is observed in both Fall 2025 and Spring 2026 — this is biologically expected.
+# No fish is observed in both Fall 2025 and Spring 2026 — this is biologically expected, but sometimes we are surprised.
 # Duration calculations assume continuous presence between first and last detection.
 
 DF %>%
@@ -374,6 +380,7 @@ DF %>%
   group_by(day) %>%
   summarise(detections = n()) %>% 
   filter(detections < quantile(detections, 0.1))
+
 
 
 DF %>% 
